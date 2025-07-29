@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Teachable Machine Image Model (Mobile)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+  <!-- ใช้เวอร์ชันที่ระบุชัดเจนของ MQTT.js แทนเวอร์ชัน latest -->
+  <script src="https://cdn.jsdelivr.net/npm/mqtt@4.3.7/dist/mqtt.min.js"></script>
+  <!-- เพิ่มการตรวจสอบว่าไลบรารีโหลดสำเร็จ -->
+  <script>
+    window.addEventListener('load', function() {
+      if (typeof mqtt === 'undefined') {
+        console.error("MQTT library failed to load");
+        document.getElementById("error").innerHTML = "ไม่สามารถโหลดไลบรารี MQTT ได้";
+      } else {
+        console.log("MQTT library loaded successfully");
+      }
+    });
+  </script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      margin: 0;
+      padding: 0;
+    }
+    #webcam-container {
+      max-width: 100%;
+      margin: 10px auto;
+    }
+    canvas {
+      max-width: 100%;
+      height: auto;
+    }
+    #label-container {
+      margin: 10px;
+      font-size: 1.2em;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 1em;
+      margin: 5px;
+    }
+    #error {
+      color: red;
+      font-size: 1em;
+      margin: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div>Teachable Machine Image Model (Mobile)</div>
+  <button type="button" onclick="init('environment')">Start (Back Camera)</button>
+  <button type="button" onclick="init('user')">Start (Front Camera)</button>
+  <button type="button" onclick="stop()">Stop</button>
+  <button type="button" onclick="testMQTT()">Test MQTT Connection</button>
+  <div id="webcam-container"></div>
+  <div id="label-container"></div>
+  <div id="error"></div>
+
+  <script type="text/javascript">
+    const URL = "https://teachablemachine.withgoogle.com/models/hGmOXhF9c/";
+    const MQTT_BROKER = "broker.hivemq.com";
+    const MQTT_PORT = 8884; // ใช้พอร์ต 8884 ตามที่ HiveMQ WebSocket Client ใช้
+    const MQTT_TOPIC = "teachable/dog_detection";
+    let model, webcam, labelContainer, maxPredictions, mqttClient;
+    let mqttConnected = false; // เพิ่มตัวแปรเพื่อติดตามสถานะการเชื่อมต่อ
+
+    // แสดงข้อผิดพลาด
+    function showError(message) {
+      console.error(message);
+      document.getElementById("error").innerHTML = message;
+    }
+
+    // เชื่อมต่อ MQTT Broker
+    // เชื่อมต่อ MQTT Broker
+    function connectMQTT() {
+      try {
+        // ใช้ wss:// แทน ws:// เพื่อความปลอดภัยและทำงานได้บน GitHub Pages
+        const options = {
+          protocol: 'wss',
+          hostname: MQTT_BROKER,
+          port: 8884, // ใช้พอร์ต 8884 ให้ตรงกันทั้งหมด
+          path: '/mqtt',
+          clean: true,
+          connectTimeout: 5000,
+          clientId: 'teachable_machine_' + Math.random().toString(16).substr(2, 8)
+        };
+        
+        console.log("Connecting to MQTT with options:", options);
+        mqttClient = mqtt.connect('wss://' + MQTT_BROKER + ':' + options.port + '/mqtt', options);
+        
+        // เพิ่ม event handlers ที่จำเป็น
+        mqttClient.on('connect', function() {
+          console.log("MQTT Connected!");
+          mqttConnected = true; // ตั้งค่าเป็น true เมื่อเชื่อมต่อสำเร็จ
+          showError("MQTT Connected successfully");
+        });
+        
+        mqttClient.on('error', function(err) {
+          console.error("MQTT Error:", err);
+          mqttConnected = false;
+          showError("MQTT Error: " + err.message);
+        });
+        
+        mqttClient.on('reconnect', function() {
+          console.log("MQTT Reconnecting...");
+          showError("MQTT Reconnecting...");
+        });
+        
+        mqttClient.on('close', function() {
+          console.log("MQTT Connection closed");
+          mqttConnected = false;
+          showError("MQTT Connection closed");
+        });
+        
+        mqttClient.on('message', function(topic, message) {
+          console.log("Received message on topic:", topic, "Message:", message.toString());
+        });
+        
+      } catch (e) {
+        console.error("MQTT Setup Error:", e);
+        showError("MQTT Setup Error: " + e.message);
+      }
+    }
+
+    // โหลดโมเดลและเริ่มกล้อง
+    async function init(facingMode) {
+      try {
+        showError("Loading model...");
+        const modelURL = URL + "model.json";
+        const metadataURL = URL + "metadata.json";
+        model = await tmImage.load(modelURL, metadataURL);
+        maxPredictions = model.getTotalClasses();
+        showError("Model loaded successfully");
+
+        // ตั้งค่า Webcam
+        webcam = new tmImage.Webcam(224, 224, false);
+        try {
+          await webcam.setup({ facingMode: facingMode });
+          await webcam.play();
+          if (!webcam.canvas) {
+            throw new Error("Webcam canvas is not initialized");
+          }
+          console.log("Webcam initialized, width:", webcam.canvas.width, "facingMode:", facingMode);
+          showError("Camera started successfully");
+        } catch (e) {
+          showError("Failed to start camera: " + e.message);
+          return;
+        }
+
+        document.getElementById("webcam-container").appendChild(webcam.canvas);
+        labelContainer = document.getElementById("label-container");
+        labelContainer.innerHTML = "";
+        for (let i = 0; i < maxPredictions; i++) {
+          labelContainer.appendChild(document.createElement("div"));
+        }
+
+        connectMQTT();
+        window.requestAnimationFrame(loop);
+      } catch (e) {
+        showError("Failed to initialize: " + e.message);
+      }
+    }
+
+    // ลูปประมวลผลภาพ
+    async function loop() {
+      try {
+        if (webcam) {
+          webcam.update();
+          await predict();
+        }
+        window.requestAnimationFrame(loop);
+      } catch (e) {
+        showError("Error in loop: " + e.message);
+      }
+    }
+
+    // ทำนายและส่งผลลัพธ์ไปยัง MQTT
+    async function predict() {
+      try {
+        const prediction = await model.predict(webcam.canvas);
+        let dogDetected = false;
+        let catDetected = false;
+        let highestPrediction = null;
+        let highestProbability = 0;
+        
+        for (let i = 0; i < maxPredictions; i++) {
+          const classPrediction = prediction[i].className + ": " + prediction[i].probability.toFixed(2);
+          labelContainer.childNodes[i].innerHTML = classPrediction;
+          
+          // หา prediction ที่มี probability สูงสุด
+          if (prediction[i].probability > highestProbability) {
+            highestProbability = prediction[i].probability;
+            highestPrediction = prediction[i].className;
+          }
+          
+          // ลดเกณฑ์จาก 0.7 เป็น 0.6 เพื่อให้ sensitive มากขึ้น
+          if (prediction[i].className.toLowerCase() === "dog" && prediction[i].probability > 0.8) {
+            dogDetected = true;
+          }
+          if (prediction[i].className.toLowerCase() === "cat" && prediction[i].probability > 0.8) {
+            catDetected = true;
+          }
+        }
+        
+        // ตรวจสอบการเชื่อมต่อ MQTT ก่อนส่ง
+        if (mqttClient && mqttConnected) {
+          const message = {
+            timestamp: new Date().toISOString(),
+            prediction: highestPrediction,
+            probability: highestProbability.toFixed(3),
+            detected: dogDetected ? "dog" : (catDetected ? "cat" : "none")
+          };
+          
+          try {
+            mqttClient.publish(MQTT_TOPIC, JSON.stringify(message), { qos: 0 });
+            console.log("Message sent:", message);
+            // แสดงสถานะการส่งข้อมูล
+            document.getElementById("error").innerHTML = "MQTT: ส่งข้อมูล " + message.detected + " เวลา " + new Date().toLocaleTimeString();
+          } catch (publishError) {
+            console.error("Failed to publish message:", publishError);
+            showError("ส่งข้อมูลไม่สำเร็จ: " + publishError.message);
+          }
+        } else {
+          console.warn("MQTT not connected, cannot send prediction");
+          showError("ไม่สามารถส่งข้อมูลได้: MQTT ไม่ได้เชื่อมต่อ");
+        }
+        
+      } catch (e) {
+        showError("Prediction error: " + e.message);
+      }
+    }
+
+    // หยุดกล้อง
+    async function stop() {
+      try {
+        if (webcam) {
+          await webcam.stop();
+          document.getElementById("webcam-container").innerHTML = "";
+          document.getElementById("label-container").innerHTML = "";
+        }
+        if (mqttClient && mqttClient.connected) {
+          mqttClient.publish(MQTT_TOPIC, "stop");
+        }
+        showError("Camera stopped");
+      } catch (e) {
+        showError("Failed to stop camera: " + e.message);
+      }
+    }
+
+    // เริ่มโหลดโมเดล
+    init('environment');
+  // เพิ่มฟังก์ชันสำหรับการส่ง MQTT
+    function testMQTT() {
+      if (mqttClient && mqttConnected) {
+        const testMessage = {
+          test: true,
+          timestamp: new Date().toISOString(),
+          message: "Test message from Teachable Machine"
+        };
+        
+        try {
+          mqttClient.publish(MQTT_TOPIC, JSON.stringify(testMessage));
+          showError("ส่งข้อความทดสอบสำเร็จ: " + JSON.stringify(testMessage));
+        } catch (e) {
+          showError("ส่งข้อความทดสอบไม่สำเร็จ: " + e.message);
+        }
+      } else {
+        connectMQTT(); // พยายามเชื่อมต่อ MQTT...
+        showError("กำลังพยายามเชื่อมต่อ MQTT...");
+      }
+    }
+    
+    // เพิ่มฟังก์ชันสำหรับการดีบัก
+    function debugMQTT() {
+      const debugInfo = {
+        mqttDefined: typeof mqtt !== 'undefined',
+        mqttClientExists: typeof mqttClient !== 'undefined',
+        connected: mqttClient ? mqttClient.connected : false,
+        reconnecting: mqttClient ? mqttClient.reconnecting : false,
+        host: MQTT_BROKER,
+        port: MQTT_PORT,
+        topic: MQTT_TOPIC,
+        browserInfo: navigator.userAgent,
+        error: document.getElementById("error").innerHTML
+      };
+      
+      console.log("MQTT Debug Info:", debugInfo);
+      showError("MQTT Debug: " + JSON.stringify(debugInfo));
+      
+      return debugInfo;
+    }
+    
+    // เพิ่มปุ่มสำหรับการดีบัก
+    function addDebugButton() {
+      const btn = document.createElement('button');
+      btn.innerHTML = 'Debug MQTT';
+      btn.onclick = debugMQTT;
+      document.body.insertBefore(btn, document.getElementById('webcam-container'));
+    }
+    
+    // เรียกใช้ฟังก์ชันเพิ่มปุ่มดีบักเมื่อโหลดหน้าเว็บ
+    window.addEventListener('load', addDebugButton);
+  </script>
+</body>
+</html>
